@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/bin/sh
 
 ######################################################################
 #* shared library auto copy tool
@@ -9,10 +9,10 @@
 #
 #  Warning:
 #     This script is force delete files in current "files" directory
-#      % rm -rf ./files
+#      % rm -rf ./output/
 #
 #  Depend(PATH required):
-#    zsh,
+#    sh(dash),
 #    awk, rm, mkdir, cp, ln, which, ldd, dirname, basename
 #
 #  USAGE:
@@ -34,9 +34,9 @@
 #                         bin/
 #                             sh
 #                         usr/bin/
-#                                 zsh
 #                                 bash
 #                                 ls
+#                                 cat
 #                                 ...
 #
 #  Development Environment:
@@ -58,22 +58,6 @@ readonly files=./files
 # output Dockerfile
 readonly dockerfile=./Dockerfile
 
-# library libraries
-typeset -g -A liblibs
-liblibs=()
-
-# library links
-typeset -g -A libliblinks
-libliblinks=()
-
-# read target commands (HASH value is not using)
-typeset -A targetcommands
-targetcommands=(sh 1 ln 1)
-for a in $*
-do  
-    targetcommands[$a]=1
-done
-
 ######################################################################
 AUTOCOPY(){
     # target
@@ -87,8 +71,8 @@ AUTOCOPY(){
 	
 	# copy target
 	p_dir=`dirname $p`
-	mkdir -p $files$p_dir
-	cp -p $p $files$p_dir
+	mkdir -p .$p_dir
+	cp -p $p .$p_dir
 
     else
 	echo "using [$p] => [/usr/local/bin/$p]"
@@ -98,15 +82,15 @@ AUTOCOPY(){
 	
 	# mkdir
 	p_dir=`dirname $p`
-	mkdir -p $files$p_dir
-	cp -p $porig $files$p_dir
+	mkdir -p $p_dir
+	cp -p $porig .$p_dir
     fi
     
+    ldd .$p >> $lddres
+}
 
-    # self
-    dockerlines="${dockerlines}COPY $files$p $p\n"
-    
-    ldd $files$p | awk 'BEGIN{
+COPYANDLN(){
+    cat $1 | awk 'BEGIN{
     ignorefile = "linux-vdso.so.1";
 }
 
@@ -115,12 +99,21 @@ $0 ~ ignorefile {
 }
 
 / *([^ ]+) *=> *([^ ]+) */ {
-    print $3 "," $1;
+    #print $3 "," $1;
+    data[$3]=1
+    data[$3 "," $1]=1
     next;
 }
 
 / *([^ ]+) */ {
-    print $1;
+    #print $1;
+    data[$1]=2
+}
+
+END{
+    for(key in data){
+        print key;
+    }
 }' | while read i
     do
 	target=""
@@ -130,24 +123,22 @@ $0 ~ ignorefile {
 	link=`echo $i | awk -F, '{print $2;}'`
 	linkhead=`echo $link | cut -c 1-7`
 	if [ "$link" != "" ] && [ "$linkhead" != "/lib64/" ]; then
-	    tmp="${target},${link}"
-	    libliblinks[$tmp]=1
+	    if [ ! -d ./lib ]; then
+		mkdir ./lib
+	    fi
+	    cd ./lib
+	    ln -s $target $link
+	    cd ..
 	fi
 
 	if [ -r $target ]; then
 	    dir=`dirname $target`
 	    file=`basename $target`
-	
-	    tmp="${files}${dir}/${file},${dir}/${file}"
-	    liblibs[$tmp]=1
-
-	    mkdir -p ./$files$dir
-	    cp -p $target ./$files$dir
+	    mkdir -p .$dir
+	    cp -p $target .$dir
 	fi
     done
-    
 }
-
 
 ######################################################################
 # main
@@ -165,14 +156,21 @@ if [ ! -d "${files}" ]; then
     exit 2
 fi
 
-# copy command and libraries
-for key in ${(k)targetcommands}
+curdir=`pwd`
+cd $files
+
+# copy command
+lddres="../temp"
+rm -f $lddres
+touch $lddres
+for key in $*
 do
     AUTOCOPY $key
 done
 
-curdir=`pwd`
-cd $files
+# exec copy and "ln -s"
+COPYANDLN $lddres
+rm -f $lddres
 
 # force set /bin/sh
 if [ ! -d ./bin ]; then
@@ -186,21 +184,18 @@ if [ ! -r ./bin/sh ]; then
     fi
 fi
 
-# ln -s
-cd ./lib
-for key in ${(k)libliblinks}
-do
-    target=`echo $key | awk -F, '{print $1;}'`
-    link=`echo $key | awk -F, '{print $2;}'`
-    ln -s $target $link
-done
-# ./outputdir/files/lib
-cd ..
-# ./outoutdir/files/
+tar cvf $curdir/files.tar ./
 
+# cd to ./output/
 cd ..
-# ./outputdir/
 
+gzip files.tar
+if [ ! -r files.tar.gz ]; then
+    echo "Error: gzip file cannot read"
+    exit 4
+fi
+
+# Make Dockerfile
 rm -f ./$dockerfile
 touch ./$dockerfile
 if [ ! -w "${dockerfile}" ]; then
@@ -208,18 +203,9 @@ if [ ! -w "${dockerfile}" ]; then
     exit 3
 fi
 echo "FROM scratch" > $dockerfile
-
-cd $files
-tar cvf $curdir/files.tar ./
+echo "ADD ./files.tar.gz /" >> $dockerfile
+echo "CMD [\"/bin/sh\"]"    >> $dockerfile
 
 cd $curdir
-gzip files.tar
-if [ ! -r files.tar.gz ]; then
-    echo "Error: gzip file cannot read"
-    exit 4
-fi
-echo "ADD ./files.tar.gz /" >> $dockerfile
-echo "CMD [\"/bin/sh\"]" >> $dockerfile
 
-
-cd ..
+# finish!
